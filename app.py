@@ -13,6 +13,9 @@ try:
 except Exception:  # pragma: no cover
     Prophet = None
 
+MIN_ROWS = 24
+TRAIN_RATIO = 0.95
+
 
 @dataclass
 class ForecastResult:
@@ -30,29 +33,29 @@ def load_excel(file_bytes: bytes) -> pd.DataFrame:
     if not required_cols.issubset(set(lower_map.keys())):
         raise ValueError("Файл должен содержать колонки: 'период' и 'показатель'.")
 
-    period_col = lower_map["период"]
-    value_col = lower_map["показатель"]
-
-    out = df[[period_col, value_col]].copy()
+    out = df[[lower_map["период"], lower_map["показатель"]]].copy()
     out.columns = ["period", "value"]
     out["period"] = pd.to_datetime(out["period"])
     out["value"] = pd.to_numeric(out["value"], errors="coerce")
     out = out.dropna().sort_values("period").reset_index(drop=True)
 
-    if len(out) < 36:
-        raise ValueError("Для расчета нужно минимум 36 наблюдений (30 train + 6 test).")
+    if len(out) < MIN_ROWS:
+        raise ValueError(f"Для расчета нужно минимум {MIN_ROWS} наблюдения.")
 
     return out
 
 
-def split_data(df: pd.DataFrame) -> Tuple[pd.DataFrame, pd.DataFrame]:
-    train = df.iloc[:30].copy()
-    test = df.iloc[-6:].copy()
+def split_data(df: pd.DataFrame, train_ratio: float = TRAIN_RATIO) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    split_idx = max(int(len(df) * train_ratio), 1)
+    split_idx = min(split_idx, len(df) - 1)
+    train = df.iloc[:split_idx].copy()
+    test = df.iloc[split_idx:].copy()
     return train, test
 
 
 def baseline_moving_average(train: pd.DataFrame, test: pd.DataFrame, window: int = 3) -> pd.Series:
     history = train["value"].tolist()
+    window = min(window, len(history))
     preds = []
     for _ in range(len(test)):
         preds.append(np.mean(history[-window:]))
@@ -61,9 +64,14 @@ def baseline_moving_average(train: pd.DataFrame, test: pd.DataFrame, window: int
 
 
 def holt_winters_model(train: pd.DataFrame, test: pd.DataFrame, season_length: int = 12) -> pd.Series:
-    model = ExponentialSmoothing(
-        train["value"], trend="add", seasonal="add", seasonal_periods=season_length
-    ).fit(optimized=True)
+    use_seasonality = len(train) >= season_length * 2
+    if use_seasonality:
+        model = ExponentialSmoothing(
+            train["value"], trend="add", seasonal="add", seasonal_periods=season_length
+        ).fit(optimized=True)
+    else:
+        model = ExponentialSmoothing(train["value"], trend="add", seasonal=None).fit(optimized=True)
+
     forecast = model.forecast(len(test))
     forecast.index = test["period"]
     forecast.name = "holt_winters"
@@ -72,7 +80,7 @@ def holt_winters_model(train: pd.DataFrame, test: pd.DataFrame, season_length: i
 
 def prophet_model(train: pd.DataFrame, test: pd.DataFrame) -> pd.Series:
     if Prophet is None:
-        raise RuntimeError("Пакет prophet не установлен.")
+        raise RuntimeError("Пакет prophet не установлен. Установите prophet отдельно для этой модели.")
 
     prop_train = train.rename(columns={"period": "ds", "value": "y"})
     model = Prophet(yearly_seasonality=True, weekly_seasonality=False, daily_seasonality=False)
@@ -115,11 +123,11 @@ def run_models(train: pd.DataFrame, test: pd.DataFrame) -> Dict[str, ForecastRes
 
 def main() -> None:
     st.set_page_config(page_title="Сравнение моделей прогнозирования", layout="wide")
-    st.title("Прогнозирование ряда: MA / Holt-Winters / Prophet")
+    st.title("Сайт для прогнозирования: MA / Holt-Winters / Prophet")
     st.write("Загрузите Excel-файл с колонками **период** и **показатель**.")
+    st.info("Разбиение: 95% train и 5% test.")
 
     uploaded = st.file_uploader("Excel-файл", type=["xlsx", "xls"])
-
     if not uploaded:
         return
 
@@ -133,38 +141,29 @@ def main() -> None:
             return
 
         metrics = pd.DataFrame(
-            [
-                {
-                    "model": r.name,
-                    "MAE": r.mae,
-                    "RMSE": r.rmse,
-                }
-                for r in results.values()
-            ]
+            [{"model": r.name, "MAE": r.mae, "RMSE": r.rmse} for r in results.values()]
         ).sort_values("RMSE")
 
         best_model_name = metrics.iloc[0]["model"]
-
-        st.subheader("Метрики на тесте (последние 6 месяцев)")
+        st.subheader("Метрики на тесте")
         st.dataframe(metrics, use_container_width=True)
         st.success(f"Лучшая модель по RMSE: **{best_model_name}**")
 
-        plot_df = df.set_index("period")["value"].to_frame("actual")
-        plot_df.loc[test["period"], "actual_test"] = test["value"].values
+        plot_df = df.set_index("period")[["value"]].rename(columns={"value": "actual"})
         for name, res in results.items():
             plot_df[name] = np.nan
             plot_df.loc[res.forecast.index, name] = res.forecast.values
 
-        st.subheader("Визуализация")
+        st.subheader("График (факт + прогнозы)")
         st.line_chart(plot_df)
 
         st.subheader("Train / Test")
         col1, col2 = st.columns(2)
         with col1:
-            st.write("Train (первые 30)")
+            st.write(f"Train ({len(train)} строк, {round(len(train)/len(df)*100, 1)}%)")
             st.dataframe(train, use_container_width=True)
         with col2:
-            st.write("Test (последние 6)")
+            st.write(f"Test ({len(test)} строк, {round(len(test)/len(df)*100, 1)}%)")
             st.dataframe(test, use_container_width=True)
 
     except Exception as err:
