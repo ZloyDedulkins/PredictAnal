@@ -1,11 +1,11 @@
-import base64
+import json
 import io
 from dataclasses import dataclass
 from typing import Dict, Tuple
 
 import numpy as np
 import pandas as pd
-from flask import Flask, render_template_string, request
+from flask import Flask, render_template, request
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 
@@ -116,32 +116,12 @@ def run_models(train: pd.DataFrame, test: pd.DataFrame) -> Dict[str, ForecastRes
     return results
 
 
-HTML = """
-<!doctype html>
-<html>
-<head><meta charset="utf-8"><title>Forecast Site</title></head>
-<body style="font-family:Arial;max-width:1100px;margin:20px auto;">
-<h1>Сайт прогнозирования (95/5 train-test)</h1>
-<form method="post" enctype="multipart/form-data">
-  <input type="file" name="file" accept=".xlsx,.xls" required>
-  <button type="submit">Загрузить и рассчитать</button>
-</form>
-{% if error %}<p style="color:red;">{{ error }}</p>{% endif %}
-{% if metrics %}
-  <h2>Метрики</h2>
-  {{ metrics|safe }}
-  <h3>Лучшая модель: {{ best_model }}</h3>
-{% endif %}
-</body>
-</html>
-"""
-
-
 @app.route('/', methods=['GET', 'POST'])
 def index():
     error = None
-    metrics_html = None
+    metrics = None
     best_model = None
+    chart_payload = None
 
     if request.method == 'POST':
         f = request.files.get('file')
@@ -152,16 +132,37 @@ def index():
                 df = load_excel(f.read())
                 train, test = split_data(df)
                 results = run_models(train, test)
-                metrics = pd.DataFrame([
+                metrics_df = pd.DataFrame([
                     {"Model": r.name, "MAE": round(r.mae, 4), "RMSE": round(r.rmse, 4)}
                     for r in results.values()
                 ]).sort_values("RMSE")
-                best_model = metrics.iloc[0]["Model"]
-                metrics_html = metrics.to_html(index=False)
+                best_model = metrics_df.iloc[0]["Model"]
+                metrics = metrics_df.to_dict(orient="records")
+
+                labels = [d.strftime("%Y-%m") for d in test["period"]]
+                datasets = [
+                    {
+                        "label": "Факт",
+                        "data": test["value"].round(4).tolist(),
+                    }
+                ]
+                for model_name, result in results.items():
+                    datasets.append({
+                        "label": model_name,
+                        "data": result.forecast.reindex(test["period"]).round(4).tolist(),
+                    })
+
+                chart_payload = json.dumps({"labels": labels, "datasets": datasets}, ensure_ascii=False)
             except Exception as exc:
                 error = str(exc)
 
-    return render_template_string(HTML, error=error, metrics=metrics_html, best_model=best_model)
+    return render_template(
+        'index.html',
+        error=error,
+        metrics=metrics,
+        best_model=best_model,
+        chart_payload=chart_payload,
+    )
 
 
 if __name__ == '__main__':
