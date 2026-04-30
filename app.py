@@ -1,20 +1,23 @@
+import base64
 import io
 from dataclasses import dataclass
 from typing import Dict, Tuple
 
 import numpy as np
 import pandas as pd
-import streamlit as st
+from flask import Flask, render_template_string, request
 from sklearn.metrics import mean_absolute_error, mean_squared_error
 from statsmodels.tsa.holtwinters import ExponentialSmoothing
 
 try:
     from prophet import Prophet
-except Exception:  # pragma: no cover
+except Exception:
     Prophet = None
 
 MIN_ROWS = 24
 TRAIN_RATIO = 0.95
+
+app = Flask(__name__)
 
 
 @dataclass
@@ -48,9 +51,7 @@ def load_excel(file_bytes: bytes) -> pd.DataFrame:
 def split_data(df: pd.DataFrame, train_ratio: float = TRAIN_RATIO) -> Tuple[pd.DataFrame, pd.DataFrame]:
     split_idx = max(int(len(df) * train_ratio), 1)
     split_idx = min(split_idx, len(df) - 1)
-    train = df.iloc[:split_idx].copy()
-    test = df.iloc[split_idx:].copy()
-    return train, test
+    return df.iloc[:split_idx].copy(), df.iloc[split_idx:].copy()
 
 
 def baseline_moving_average(train: pd.DataFrame, test: pd.DataFrame, window: int = 3) -> pd.Series:
@@ -60,37 +61,32 @@ def baseline_moving_average(train: pd.DataFrame, test: pd.DataFrame, window: int
     for _ in range(len(test)):
         preds.append(np.mean(history[-window:]))
         history.append(preds[-1])
-    return pd.Series(preds, index=test["period"], name="baseline_ma")
+    return pd.Series(preds, index=test["period"], name="Moving Average (baseline)")
 
 
 def holt_winters_model(train: pd.DataFrame, test: pd.DataFrame, season_length: int = 12) -> pd.Series:
-    use_seasonality = len(train) >= season_length * 2
-    if use_seasonality:
+    if len(train) >= season_length * 2:
         model = ExponentialSmoothing(
             train["value"], trend="add", seasonal="add", seasonal_periods=season_length
         ).fit(optimized=True)
     else:
         model = ExponentialSmoothing(train["value"], trend="add", seasonal=None).fit(optimized=True)
-
     forecast = model.forecast(len(test))
     forecast.index = test["period"]
-    forecast.name = "holt_winters"
+    forecast.name = "Holt-Winters"
     return forecast
 
 
 def prophet_model(train: pd.DataFrame, test: pd.DataFrame) -> pd.Series:
     if Prophet is None:
-        raise RuntimeError("Пакет prophet не установлен. Установите prophet отдельно для этой модели.")
-
+        raise RuntimeError("Prophet не установлен")
     prop_train = train.rename(columns={"period": "ds", "value": "y"})
     model = Prophet(yearly_seasonality=True, weekly_seasonality=False, daily_seasonality=False)
     model.fit(prop_train)
-
     future = pd.DataFrame({"ds": test["period"]})
     pred = model.predict(future)
     forecast = pred.set_index("ds")["yhat"]
-    forecast.index.name = None
-    forecast.name = "prophet"
+    forecast.name = "Prophet"
     return forecast
 
 
@@ -101,74 +97,72 @@ def evaluate(y_true: pd.Series, y_pred: pd.Series) -> Tuple[float, float]:
 
 
 def run_models(train: pd.DataFrame, test: pd.DataFrame) -> Dict[str, ForecastResult]:
-    results = {}
     y_true = test.set_index("period")["value"]
-
-    models = {
+    model_fns = {
         "Moving Average (baseline)": lambda: baseline_moving_average(train, test),
         "Holt-Winters": lambda: holt_winters_model(train, test),
         "Prophet": lambda: prophet_model(train, test),
     }
-
-    for name, fn in models.items():
+    results = {}
+    for name, fn in model_fns.items():
         try:
             pred = fn()
             mae, rmse = evaluate(y_true, pred)
-            results[name] = ForecastResult(name=name, forecast=pred, mae=mae, rmse=rmse)
-        except Exception as exc:
-            st.warning(f"Модель {name} не рассчитана: {exc}")
-
+            results[name] = ForecastResult(name, pred, mae, rmse)
+        except Exception:
+            continue
+    if not results:
+        raise RuntimeError("Ни одна модель не смогла посчитать прогноз")
     return results
 
 
-def main() -> None:
-    st.set_page_config(page_title="Сравнение моделей прогнозирования", layout="wide")
-    st.title("Сайт для прогнозирования: MA / Holt-Winters / Prophet")
-    st.write("Загрузите Excel-файл с колонками **период** и **показатель**.")
-    st.info("Разбиение: 95% train и 5% test.")
-
-    uploaded = st.file_uploader("Excel-файл", type=["xlsx", "xls"])
-    if not uploaded:
-        return
-
-    try:
-        df = load_excel(uploaded.getvalue())
-        train, test = split_data(df)
-        results = run_models(train, test)
-
-        if not results:
-            st.error("Не удалось рассчитать ни одну модель.")
-            return
-
-        metrics = pd.DataFrame(
-            [{"model": r.name, "MAE": r.mae, "RMSE": r.rmse} for r in results.values()]
-        ).sort_values("RMSE")
-
-        best_model_name = metrics.iloc[0]["model"]
-        st.subheader("Метрики на тесте")
-        st.dataframe(metrics, use_container_width=True)
-        st.success(f"Лучшая модель по RMSE: **{best_model_name}**")
-
-        plot_df = df.set_index("period")[["value"]].rename(columns={"value": "actual"})
-        for name, res in results.items():
-            plot_df[name] = np.nan
-            plot_df.loc[res.forecast.index, name] = res.forecast.values
-
-        st.subheader("График (факт + прогнозы)")
-        st.line_chart(plot_df)
-
-        st.subheader("Train / Test")
-        col1, col2 = st.columns(2)
-        with col1:
-            st.write(f"Train ({len(train)} строк, {round(len(train)/len(df)*100, 1)}%)")
-            st.dataframe(train, use_container_width=True)
-        with col2:
-            st.write(f"Test ({len(test)} строк, {round(len(test)/len(df)*100, 1)}%)")
-            st.dataframe(test, use_container_width=True)
-
-    except Exception as err:
-        st.error(f"Ошибка обработки файла: {err}")
+HTML = """
+<!doctype html>
+<html>
+<head><meta charset="utf-8"><title>Forecast Site</title></head>
+<body style="font-family:Arial;max-width:1100px;margin:20px auto;">
+<h1>Сайт прогнозирования (95/5 train-test)</h1>
+<form method="post" enctype="multipart/form-data">
+  <input type="file" name="file" accept=".xlsx,.xls" required>
+  <button type="submit">Загрузить и рассчитать</button>
+</form>
+{% if error %}<p style="color:red;">{{ error }}</p>{% endif %}
+{% if metrics %}
+  <h2>Метрики</h2>
+  {{ metrics|safe }}
+  <h3>Лучшая модель: {{ best_model }}</h3>
+{% endif %}
+</body>
+</html>
+"""
 
 
-if __name__ == "__main__":
-    main()
+@app.route('/', methods=['GET', 'POST'])
+def index():
+    error = None
+    metrics_html = None
+    best_model = None
+
+    if request.method == 'POST':
+        f = request.files.get('file')
+        if not f:
+            error = "Файл не загружен"
+        else:
+            try:
+                df = load_excel(f.read())
+                train, test = split_data(df)
+                results = run_models(train, test)
+                metrics = pd.DataFrame([
+                    {"Model": r.name, "MAE": round(r.mae, 4), "RMSE": round(r.rmse, 4)}
+                    for r in results.values()
+                ]).sort_values("RMSE")
+                best_model = metrics.iloc[0]["Model"]
+                metrics_html = metrics.to_html(index=False)
+            except Exception as exc:
+                error = str(exc)
+
+    return render_template_string(HTML, error=error, metrics=metrics_html, best_model=best_model)
+
+
+if __name__ == '__main__':
+    app.run(host='0.0.0.0', port=8000, debug=False)
