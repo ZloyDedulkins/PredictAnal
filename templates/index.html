@@ -1,0 +1,77 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>PredictAnal — прогнозирование</title>
+  <link rel="stylesheet" href="{{ url_for('static', filename='style.css') }}" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+</head>
+<body>
+  <main class="container">
+    <header>
+      <h1>PredictAnal</h1>
+      <p>Загрузите Excel и получите сравнение моделей с графиком прогноза.</p>
+    </header>
+
+    <section class="card">
+      <form method="post" enctype="multipart/form-data" class="upload-form">
+        <label for="file">Excel файл (.xlsx/.xls) c колонками <b>период</b>, <b>показатель</b></label>
+        <input id="file" type="file" name="file" accept=".xlsx,.xls" required />
+        <button type="submit">Рассчитать прогноз</button>
+      </form>
+      {% if error %}
+      <p class="error">{{ error }}</p>
+      {% endif %}
+    </section>
+
+    {% if metrics %}
+    <section class="card">
+      <h2>Метрики качества</h2>
+      <table>
+        <thead><tr><th>Модель</th><th>MAE</th><th>RMSE</th></tr></thead>
+        <tbody>
+          {% for row in metrics %}
+          <tr>
+            <td>{{ row.Model }}</td>
+            <td>{{ row.MAE }}</td>
+            <td>{{ row.RMSE }}</td>
+          </tr>
+          {% endfor %}
+        </tbody>
+      </table>
+      <p class="best">Лучшая модель: <b>{{ best_model }}</b></p>
+    </section>
+
+    <section class="card">
+      <h2>Сравнение прогноза с фактом (test 5%)</h2>
+      <canvas id="forecastChart" height="120"></canvas>
+    </section>
+    {% endif %}
+  </main>
+
+  {% if chart_payload %}
+  <script>
+    const payload = {{ chart_payload|safe }};
+    const colors = ["#0ea5e9", "#22c55e", "#f97316", "#a855f7", "#ef4444"];
+    const datasets = payload.datasets.map((d, i) => ({
+      ...d,
+      borderColor: colors[i % colors.length],
+      backgroundColor: colors[i % colors.length],
+      tension: 0.25,
+      fill: false
+    }));
+
+    new Chart(document.getElementById('forecastChart'), {
+      type: 'line',
+      data: { labels: payload.labels, datasets },
+      options: {
+        responsive: true,
+        interaction: { mode: 'index', intersect: false },
+        plugins: { legend: { position: 'bottom' } }
+      }
+    });
+  </script>
+  {% endif %}
+</body>
+</html>
