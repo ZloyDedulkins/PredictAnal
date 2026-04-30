@@ -9,12 +9,13 @@
 </head>
 <body>
   <main class="container">
-    <header>
+    <header class="hero">
       <h1>PredictAnal</h1>
-      <p>Загрузите Excel и получите сравнение моделей с графиком прогноза.</p>
+      <p>Загрузите Excel и получите сравнение моделей, полный график ряда и прогноз на следующий месяц.</p>
+      <div class="badge">Flask · Time Series · Forecast</div>
     </header>
 
-    <section class="card">
+    <section class="card accent">
       <form method="post" enctype="multipart/form-data" class="upload-form">
         <label for="file">Excel файл (.xlsx/.xls) c колонками <b>период</b>, <b>показатель</b></label>
         <input id="file" type="file" name="file" accept=".xlsx,.xls" required />
@@ -27,24 +28,25 @@
 
     {% if metrics %}
     <section class="card">
-      <h2>Метрики качества</h2>
+      <h2>Метрики качества и прогноз на следующий месяц</h2>
       <table>
-        <thead><tr><th>Модель</th><th>MAE</th><th>RMSE</th></tr></thead>
+        <thead><tr><th>Модель</th><th>MAE</th><th>RMSE</th><th>Следующий месяц</th></tr></thead>
         <tbody>
           {% for row in metrics %}
           <tr>
             <td>{{ row.Model }}</td>
             <td>{{ row.MAE }}</td>
             <td>{{ row.RMSE }}</td>
+            <td>{{ row.NextMonth }}</td>
           </tr>
           {% endfor %}
         </tbody>
       </table>
-      <p class="best">Лучшая модель: <b>{{ best_model }}</b></p>
+      <p class="best">Лучшая модель: <b>{{ best_model }}</b> · прогноз: <b>{{ next_month_forecast }}</b></p>
     </section>
 
     <section class="card">
-      <h2>Сравнение прогноза с фактом (test 5%)</h2>
+      <h2>График за весь период + следующий месяц</h2>
       <canvas id="forecastChart" height="120"></canvas>
     </section>
     {% endif %}
@@ -58,6 +60,8 @@
       ...d,
       borderColor: colors[i % colors.length],
       backgroundColor: colors[i % colors.length],
+      borderWidth: i === 0 ? 3 : 2,
+      pointRadius: i === 0 ? 2.5 : 1.8,
       tension: 0.25,
       fill: false
     }));
@@ -68,7 +72,17 @@
       options: {
         responsive: true,
         interaction: { mode: 'index', intersect: false },
-        plugins: { legend: { position: 'bottom' } }
+        plugins: {
+          legend: { position: 'bottom' },
+          title: {
+            display: true,
+            text: `Прогноз построен до ${payload.next_period}`
+          }
+        },
+        scales: {
+          x: { grid: { color: 'rgba(148,163,184,0.16)' } },
+          y: { grid: { color: 'rgba(148,163,184,0.16)' } }
+        }
       }
     });
   </script>
